@@ -3,11 +3,11 @@ import React, { useEffect, useMemo, useRef, useState } from "react";
 /*************************
  * Goal Tracker — Best UI (Zero deps)
  * List view only + Multi-theme + Google Sheets auto-sync
- * Option B: remove crypto.hash usage, use JSON string compare for change detection
  * Fixes:
- *  - ES-safe catch blocks
+ *  - ES version safe catch blocks (no bare `catch {}`)
  *  - Valid hex color in AMOLED theme
  *  - Correct pullFromSheets definition
+ *  - Optional snapshot merge/clear sync protocol
  *************************/
 
 // Tiny emoji icons (no external libs)
@@ -24,7 +24,7 @@ const I = {
 // ---- GOOGLE SHEETS CONFIG ----
 // Always use this URL (per your request)
 const SHEETS_API_URL =
-  "https://script.google.com/macros/s/AKfycbyMW3zIHyDukEgYOElzYt_Psld1E-ZoS04QPlDEL0f0hofUsdRnkexfHDvYpTWSMwhKJw/exec";
+  "https://script.google.com/macros/s/AKfycbxS4iMIIb7djv_ZdsFsIzITgz140RYVSoHZdIvhHIY3t4cq0cLVUW7pA4XhsnKfN3DdNA/exec";
 // If you set REQUIRE_API_KEY=true in Apps Script, put the same value here (else leave empty)
 const API_KEY = "";
 
@@ -162,7 +162,7 @@ async function pushToSheets(goals) {
     return { ok: false, error: String(e) };
   }
 }
-async function pullFromSheets() {
+async function pullFromSheets() {() {
   const url = API_KEY ? `${SHEETS_API_URL}?key=${encodeURIComponent(API_KEY)}` : SHEETS_API_URL;
   const res = await fetch(url);
   if (!res.ok) {
@@ -217,20 +217,6 @@ export default function App() {
   const [syncBusy, setSyncBusy] = useState(false);
   const firstRender = useRef(true);
   const pendingTimer = useRef(null);
-
-  // Option B: simple JSON string compare to detect changes (no Node crypto)
-  const lastSnapshotRef = useRef("");
-  const hasGoalsChanged = (data) => {
-    try {
-      const serialized = JSON.stringify(data);
-      if (serialized === lastSnapshotRef.current) return false;
-      lastSnapshotRef.current = serialized;
-      return true;
-    } catch (e) {
-      // If serialization fails for any reason, treat as changed to avoid missing updates
-      return true;
-    }
-  };
 
   // Derived
   const overall = useMemo(() => {
@@ -339,10 +325,6 @@ export default function App() {
   // --- Auto-sync to Google Sheets (debounced, never throws)
   useEffect(() => {
     if (firstRender.current) { firstRender.current = false; return; }
-
-    // Only proceed if the data actually changed (Option B):
-    if (!hasGoalsChanged(goals)) return;
-
     if (pendingTimer.current) clearTimeout(pendingTimer.current);
 
     pendingTimer.current = setTimeout(async () => {
