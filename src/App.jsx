@@ -152,25 +152,25 @@ async function pushToSheets(goals) {
       body: JSON.stringify({ mode: 'replace', rows }) // always full snapshot
     });
     if (!res.ok) {
-      const text = await res.text().catch(()=> '');
+      const text = await res.text().catch((e)=> '');
       console.error('Export error', res.status, text);
       return { ok: false, status: res.status, body: text };
     }
-    return await res.json().catch(()=>({ ok: true }));
+    return await res.json().catch((e)=>({ ok: true }));
   } catch (e) {
     console.error('Export network error', e);
     return { ok: false, error: String(e) };
   }
 }
-async function pullFromSheets() {() {
+async function pullFromSheets() {
   const url = API_KEY ? `${SHEETS_API_URL}?key=${encodeURIComponent(API_KEY)}` : SHEETS_API_URL;
   const res = await fetch(url);
   if (!res.ok) {
-    const text = await res.text().catch(()=> '');
+    const text = await res.text().catch((e)=> '');
     console.error('Import error', res.status, text);
     throw new Error(`Failed to pull from Sheets (status ${res.status}).`);
   }
-  const data = await res.json().catch(()=>({ rows: [] }));
+  const data = await res.json().catch((e)=>({ rows: [] }));
   return inflateFromSheet(data.rows || []);
 }
 
@@ -697,6 +697,11 @@ function AddTaskPanel({ T, goal, onAdd }) {
     const flat = flattenForSheet([g0]);
     const inflated = inflateFromSheet(flat);
     assert(inflated.length===1 && inflated[0].tasks.length===1, "inflate keeps one task");
+
+    // NEW: flatten goal-only row
+    const gOnly = { id:"g2", title:"NoTasks", impact:"Low", targetDate:"2025-12-31", tasks:[] };
+    const flatOnly = flattenForSheet([gOnly]);
+    assert(flatOnly.length===1 && flatOnly[0].frequency==='goal', "goal-only flatten emits placeholder");
 
     // theme sanity
     assert(TAmoled.muted==="#0a0a0a","AMOLED muted valid hex");
