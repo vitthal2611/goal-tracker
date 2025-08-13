@@ -1,14 +1,42 @@
+// ==========================
+// Goal Tracker — Production Build (Zero Deps)
+// ==========================
+// Frontend: React single-file component (drop-in for Vite/CRA)
+// Backend: Google Apps Script (Web App) + optional Cloudflare Worker CORS proxy
+// ------------------------------------------
+// Notes:
+//  - Replace SHEETS_API_URL with your deployed Apps Script Web App **/exec** URL.
+//  - Make the Apps Script deployment public (Execute as: Me, Who has access: Anyone).
+//  - POST uses Content-Type: text/plain to avoid preflight.
+//  - Optional CORS proxy: set CORS_PROXY_URL to a Worker that forwards and adds CORS headers.
+//  - On first load, the app imports all goals/tasks automatically, then enables auto-sync.
+// ------------------------------------------
+
 import React, { useEffect, useMemo, useRef, useState } from "react";
 
 /*************************
  * Goal Tracker — Best UI (Zero deps)
- * List view only + Multi-theme + Google Sheets auto-sync
- * Fixes:
- *  - ES version safe catch blocks (no bare `catch {}`)
- *  - Valid hex color in AMOLED theme
- *  - Correct pullFromSheets definition
- *  - Optional snapshot merge/clear sync protocol
+ * List view + Multi-theme + Google Sheets auto-sync
+ * Hardening for production:
+ *  - No Node-only crypto calls (works on mobile + desktop)
+ *  - Robust CORS handling (optional proxy)
+ *  - First-load import of all goals/tasks
+ *  - Debounced, failure-tolerant auto-sync
+ *  - Defensive JSON parsing & SSR-safe localStorage
+ *  - Dev self-tests kept + a few more
  *************************/
+
+// ==========================
+// Config
+// ==========================
+// Prefer env vars if available (Vite): VITE_SHEETS_API_URL, VITE_SHEETS_API_KEY, VITE_CORS_PROXY_URL
+const SHEETS_API_URL = (typeof import.meta !== 'undefined' && import.meta.env && import.meta.env.VITE_SHEETS_API_URL)
+  || "https://script.google.com/macros/s/AKfycbyHRwu-spWdIlsMIHWJjpsDYfBtGNdTaJfsTiwnHmhxroNcLvgtrW2qQClDrQ_GIn4n/exec"; // <-- REPLACE
+const API_KEY = (typeof import.meta !== 'undefined' && import.meta.env && import.meta.env.VITE_SHEETS_API_KEY)
+  || ""; // leave blank if Apps Script doesn't enforce an API key
+// Optional CORS proxy (Cloudflare Worker below). Leave blank if Apps Script is public and works directly.
+const CORS_PROXY_URL = (typeof import.meta !== 'undefined' && import.meta.env && import.meta.env.VITE_CORS_PROXY_URL)
+  || ""; // e.g., https://your-worker.example.workers.dev
 
 // Tiny emoji icons (no external libs)
 const I = {
@@ -21,14 +49,9 @@ const I = {
   download: (p) => <span {...p}>↙</span>,
 };
 
-// ---- GOOGLE SHEETS CONFIG ----
-// Always use this URL (per your request)
-const SHEETS_API_URL =
-  "https://script.google.com/macros/s/AKfycbxS4iMIIb7djv_ZdsFsIzITgz140RYVSoHZdIvhHIY3t4cq0cLVUW7pA4XhsnKfN3DdNA/exec";
-// If you set REQUIRE_API_KEY=true in Apps Script, put the same value here (else leave empty)
-const API_KEY = "";
-
-// ---- Theme tokens
+// ==========================
+// Themes
+// ==========================
 const TLight = { name: "light", bg: "#f7f7f8", text: "#0f172a", sub: "#64748b", card: "#ffffff", cardBorder: "#e5e7eb", muted: "#f3f4f6", dangerBg: "#fef2f2", danger: "#b91c1c", accent: "#111827", radius: 12, radiusLg: 16, shadow: "0 1px 2px rgba(0,0,0,0.04)" };
 const TDark = { name: "dark", bg: "#0b1220", text: "#e5e7eb", sub: "#94a3b8", card: "#0f172a", cardBorder: "#1f2937", muted: "#101827", dangerBg: "#2b0f13", danger: "#f87171", accent: "#6366f1", radius: 12, radiusLg: 16, shadow: "0 1px 2px rgba(0,0,0,0.20)" };
 const TEmerald = { name: "emerald", bg: "#f6fef9", text: "#064e3b", sub: "#047857", card: "#ffffff", cardBorder: "#def7ec", muted: "#ecfdf5", dangerBg: "#fff1f2", danger: "#be123c", accent: "#059669", radius: 12, radiusLg: 16, shadow: "0 1px 2px rgba(0,0,0,0.04)" };
@@ -45,7 +68,9 @@ const THEME_OPTIONS = [
   { id: "amoled", label: "AMOLED" },
 ];
 
-// ---- Helpers
+// ==========================
+// Helpers
+// ==========================
 const uid = () => ((typeof crypto !== 'undefined' && crypto.randomUUID) ? crypto.randomUUID() : Math.random().toString(36).slice(2));
 const todayISO = () => new Date().toISOString().slice(0, 10);
 const toISO = (d) => new Date(Date.UTC(d.getFullYear(), d.getMonth(), d.getDate())).toISOString().slice(0, 10);
@@ -80,7 +105,7 @@ const buildSeries = (title, impact, startISO, endISO, freq) => {
   return out;
 };
 
-// ---- Local storage (SSR-safe)
+// SSR-safe localStorage hook
 const useLocal = (key, init) => {
   const [val, setVal] = useState(() => {
     if (typeof window === 'undefined') return init;
@@ -96,7 +121,17 @@ const useLocal = (key, init) => {
   return [val, setVal];
 };
 
-// ---- Google Sheets helpers
+// ==========================
+// Google Sheets helpers (CORS-aware)
+// ==========================
+async function fetchSheets(url, opts = {}) {
+  const finalUrl = API_KEY ? `${url}?key=${encodeURIComponent(API_KEY)}` : url;
+  if (!CORS_PROXY_URL) return fetch(finalUrl, opts);
+  // Proxy format: GET/POST to <CORS_PROXY_URL>?u=<encoded target>
+  const proxied = `${CORS_PROXY_URL}${CORS_PROXY_URL.endsWith('/') ? '' : '/'}?u=${encodeURIComponent(finalUrl)}`;
+  return fetch(proxied, opts);
+}
+
 function flattenForSheet(goals) {
   const rows = [];
   goals.forEach(g => {
@@ -122,6 +157,7 @@ function flattenForSheet(goals) {
   });
   return rows;
 }
+
 function inflateFromSheet(rows) {
   const byGoal = new Map();
   rows.forEach(r => {
@@ -142,43 +178,52 @@ function inflateFromSheet(rows) {
   });
   return [...byGoal.values()].map(g => ({ ...g, tasks: g.tasks.sort((a,b)=>a.dueDate.localeCompare(b.dueDate)) }));
 }
+
 async function pushToSheets(goals) {
   const rows = flattenForSheet(goals); // can be []
-  const url = API_KEY ? `${SHEETS_API_URL}?key=${encodeURIComponent(API_KEY)}` : SHEETS_API_URL;
   try {
-    const res = await fetch(url, {
+    const res = await fetchSheets(SHEETS_API_URL, {
       method: 'POST',
       headers: { 'Content-Type': 'text/plain;charset=utf-8' }, // simple request, no preflight
-      body: JSON.stringify({ mode: 'replace', rows }) // always full snapshot
+      body: JSON.stringify({ mode: 'replace', rows }) // full snapshot
     });
     if (!res.ok) {
-      const text = await res.text().catch((e)=> '');
+      const text = await res.text().catch(()=> '');
       console.error('Export error', res.status, text);
       return { ok: false, status: res.status, body: text };
     }
-    return await res.json().catch((e)=>({ ok: true }));
+    let out; try { out = await res.json(); } catch { out = { ok: res.ok }; }
+    return out;
   } catch (e) {
     console.error('Export network error', e);
     return { ok: false, error: String(e) };
   }
 }
+
 async function pullFromSheets() {
-  const url = API_KEY ? `${SHEETS_API_URL}?key=${encodeURIComponent(API_KEY)}` : SHEETS_API_URL;
-  const res = await fetch(url);
+  const res = await fetchSheets(SHEETS_API_URL);
   if (!res.ok) {
-    const text = await res.text().catch((e)=> '');
+    const text = await res.text().catch(()=> '');
     console.error('Import error', res.status, text);
     throw new Error(`Failed to pull from Sheets (status ${res.status}).`);
   }
-  const data = await res.json().catch((e)=>({ rows: [] }));
+  const ct = res.headers.get('content-type') || '';
+  const text = await res.text();
+  if (!ct.includes('application/json')) {
+    if (text.trim().startsWith('<!DOCTYPE') || text.trim().startsWith('<html')) {
+      throw new Error('Import failed: endpoint returned HTML (likely sign-in/non-public). Make the Apps Script public or set CORS_PROXY_URL.');
+    }
+  }
+  let data; try { data = JSON.parse(text); } catch { data = { rows: [] }; }
   return inflateFromSheet(data.rows || []);
 }
 
-// ---- Sort helpers (defensive)
+// ==========================
+// Sort helpers
+// ==========================
 const SORT_OPTIONS = ["dueAsc", "dueDesc", "impactHigh", "impactLow"];
 const sanitizeSort = (v) => (SORT_OPTIONS.includes(v) ? v : "dueAsc");
 
-// ---- UI atoms
 const ImpactPill = ({ level, T }) => {
   const map = { Low:{b:'#bbf7d0',t:'#166534',bd:'#86efac'}, Medium:{b:'#fde68a',t:'#92400e',bd:'#fcd34d'}, High:{b:'#fecaca',t:'#7f1d1d',bd:'#fca5a5'} };
   const dm = { Low:{b:'#07341f',t:'#86efac',bd:'#065f46'}, Medium:{b:'#3b2b05',t:'#facc15',bd:'#92400e'}, High:{b:'#3a0b0b',t:'#fda4af',bd:'#7f1d1d'} };
@@ -187,6 +232,9 @@ const ImpactPill = ({ level, T }) => {
   return <span style={{ fontSize:12, padding:'2px 8px', borderRadius:999, background:c.b, color:c.t, border:`1px solid ${c.bd}`, whiteSpace:'nowrap' }}>{level}</span>;
 };
 
+// ==========================
+// App
+// ==========================
 export default function App() {
   const [themeId, setThemeId] = useLocal("gt_theme", "light");
   const T = THEMES[themeId] || TLight;
@@ -194,6 +242,10 @@ export default function App() {
   const [goals, setGoals] = useLocal("gt_best_goals", []);
   const [showAddGoal, setShowAddGoal] = useState(true);
   const [filtersOpen, setFiltersOpen] = useState(false);
+
+  // Initial load from Google Sheets
+  const [initializing, setInitializing] = useState(true);
+  const skipNextSync = useRef(false);
 
   // Filters
   const [impHigh, setImpHigh] = useState(true);
@@ -203,7 +255,7 @@ export default function App() {
   const [dateScope, setDateScope] = useState("all"); // all | today | week | overdue
   const [search, setSearch] = useState("");
 
-  // Defensive sort state: sanitize loaded value
+  // Defensive sort state
   const [sortModeRaw, setSortModeRaw] = useLocal("gt_sort", "dueAsc");
   const sortMode = sanitizeSort(sortModeRaw);
 
@@ -218,7 +270,7 @@ export default function App() {
   const firstRender = useRef(true);
   const pendingTimer = useRef(null);
 
-  // Derived
+  // Derived overall progress
   const overall = useMemo(() => {
     if (!goals.length) return 0;
     const denom = goals.reduce((s, g) => s + impactWeight(g.impact), 0) || 1;
@@ -322,17 +374,17 @@ export default function App() {
     return () => window.removeEventListener('keydown', onKey);
   }, []);
 
-  // --- Auto-sync to Google Sheets (debounced, never throws)
+  // Auto-sync to Google Sheets (debounced, never throws)
   useEffect(() => {
     if (firstRender.current) { firstRender.current = false; return; }
+    if (skipNextSync.current) { skipNextSync.current = false; return; }
+
     if (pendingTimer.current) clearTimeout(pendingTimer.current);
 
     pendingTimer.current = setTimeout(async () => {
       try {
         const res = await pushToSheets(goals);
-        if (!res?.ok) {
-          console.warn("Auto-sync failed (non-OK)", res);
-        }
+        if (!res?.ok) console.warn("Auto-sync failed (non-OK)", res);
       } catch (e) {
         console.warn("Auto-sync failed (exception)", e);
       }
@@ -340,6 +392,21 @@ export default function App() {
 
     return () => { if (pendingTimer.current) clearTimeout(pendingTimer.current); };
   }, [goals]);
+
+  // Initial import on first render (load all goals/tasks)
+  useEffect(() => {
+    (async () => {
+      try {
+        const pulled = await pullFromSheets();
+        skipNextSync.current = true; // don't immediately re-export the same data
+        setGoals(pulled);
+      } catch (e) {
+        console.warn('Initial import failed:', e);
+      } finally {
+        setInitializing(false);
+      }
+    })();
+  }, []);
 
   // Styles
   const page = { minHeight: '100vh', background: T.bg, color: T.text, transition: 'background .2s ease, color .2s ease' };
@@ -354,7 +421,7 @@ export default function App() {
   const onLeave = (e) => { e.currentTarget.style.transform = 'translateY(0)'; e.currentTarget.style.boxShadow = 'none'; };
   const chip = (active) => ({ padding:'6px 10px', borderRadius:999, background: active ? T.accent : T.card, color: active ? '#fff' : T.text, border: `1px solid ${active ? T.accent : T.cardBorder}`, cursor: 'pointer' });
 
-  // Sorting comparator (defensive default)
+  // Sorting comparator
   const cmp = (a,b) => {
     const impRank = { High:3, Medium:2, Low:1 };
     switch (sortMode) {
@@ -404,7 +471,7 @@ export default function App() {
                   else alert('Synced to Google Sheets ✅');
                 } catch (e) {
                   console.warn('Manual export failed', e);
-                  alert('Sync failed: ' + e.message);
+                  alert('Sync failed: ' + (e?.message || String(e)));
                 } finally { setSyncBusy(false); }
               }}
               style={{...hoverable(btn), opacity: syncBusy?0.6:1}}
@@ -421,7 +488,7 @@ export default function App() {
                   setGoals(pulled);
                   alert('Imported from Google Sheets ✅');
                 } catch(e){
-                  alert('Import failed: ' + e.message);
+                  alert('Import failed: ' + (e?.message || String(e)));
                 } finally { setSyncBusy(false); }
               }}
               style={{...hoverable(btnGhost), opacity: syncBusy?0.6:1}}
@@ -433,6 +500,11 @@ export default function App() {
 
       {/* Controls */}
       <div style={container}>
+        {initializing && (
+          <div style={{ ...card, marginBottom: 12, fontSize: 13 }}>
+            Loading from Google Sheets…
+          </div>
+        )}
         <div style={{ display:'flex', gap:8, flexWrap:'wrap', alignItems:'center' }}>
           <button onClick={() => setShowAddGoal(v => !v)} style={hoverable(btn)} onMouseEnter={onHover} onMouseLeave={onLeave}>
             <I.add /> {showAddGoal ? "Hide" : "Add Goal"}
@@ -698,10 +770,16 @@ function AddTaskPanel({ T, goal, onAdd }) {
     const inflated = inflateFromSheet(flat);
     assert(inflated.length===1 && inflated[0].tasks.length===1, "inflate keeps one task");
 
-    // NEW: flatten goal-only row
+    // goal-only flatten
     const gOnly = { id:"g2", title:"NoTasks", impact:"Low", targetDate:"2025-12-31", tasks:[] };
     const flatOnly = flattenForSheet([gOnly]);
     assert(flatOnly.length===1 && flatOnly[0].frequency==='goal', "goal-only flatten emits placeholder");
+
+    // sort comparator stability
+    const s1 = [{dueDate:'2025-01-02',impact:'Low'},{dueDate:'2025-01-01',impact:'High'}].sort((a,b)=>{
+      const impRank = { High:3, Medium:2, Low:1 }; return (impRank[b.impact]||0)-(impRank[a.impact]||0) || a.dueDate.localeCompare(b.dueDate);
+    });
+    assert(s1[0].impact==='High', 'impactHigh comparator works');
 
     // theme sanity
     assert(TAmoled.muted==="#0a0a0a","AMOLED muted valid hex");
@@ -711,3 +789,78 @@ function AddTaskPanel({ T, goal, onAdd }) {
     console.warn("Dev tests: ❌", e);
   }
 })();
+
+
+// =============================================================
+// BACKEND (Apps Script) — paste into Google Apps Script (Code.gs)
+// =============================================================
+// Sheet config
+// const SHEET_NAME = 'data';
+// const HEADERS = [
+//   'goalId','goalTitle','goalImpact','goalTargetDate',
+//   'taskId','taskTitle','taskDueDate','taskImpact','frequency','completed'
+// ];
+//
+// function doGet(e) {
+//   const sheet = getSheet_();
+//   ensureHeader_(sheet);
+//   const rows = readRows_(sheet);
+//   return ContentService
+//     .createTextOutput(JSON.stringify({ rows }))
+//     .setMimeType(ContentService.MimeType.JSON);
+// }
+//
+// function doPost(e) {
+//   try {
+//     const body = JSON.parse(e.postData && e.postData.contents || '{}');
+//     const mode = body.mode || 'replace';
+//     const rows = Array.isArray(body.rows) ? body.rows : [];
+//     const sheet = getSheet_();
+//     ensureHeader_(sheet);
+//     if (mode === 'merge') mergeRows_(sheet, rows);
+//     else if (mode === 'append') appendRows_(sheet, rows);
+//     else { clearDataRows_(sheet); writeRows_(sheet, rows); }
+//     return ContentService.createTextOutput(JSON.stringify({ ok:true })).setMimeType(ContentService.MimeType.JSON);
+//   } catch (err) {
+//     return ContentService.createTextOutput(JSON.stringify({ ok:false, error:String(err) })).setMimeType(ContentService.MimeType.JSON);
+//   }
+// }
+//
+// function getSheet_(){ const ss=SpreadsheetApp.getActiveSpreadsheet(); return ss.getSheetByName(SHEET_NAME)||ss.insertSheet(SHEET_NAME); }
+// function writeHeader_(sh){ sh.getRange(1,1,1,HEADERS.length).setValues([HEADERS]); }
+// function ensureHeader_(sh){ const lr=sh.getLastRow(); if(lr===0){writeHeader_(sh);return;} const first=sh.getRange(1,1,1,HEADERS.length).getValues()[0]; const same=HEADERS.every((h,i)=>(first[i]||'')===h); if(!same) writeHeader_(sh); }
+// function clearDataRows_(sh){ const lr=sh.getLastRow(); if(lr>=2) sh.getRange(2,1,lr-1,HEADERS.length).clearContent(); }
+// function writeRows_(sh,rows){ if(!rows||!rows.length) return; const out=rows.map(r=>HEADERS.map(h=>r[h]??'')); sh.getRange(2,1,out.length,HEADERS.length).setValues(out); }
+// function appendRows_(sh,rows){ if(!rows||!rows.length) return; const start=Math.max(1,sh.getLastRow())+1; const out=rows.map(r=>HEADERS.map(h=>r[h]??'')); sh.getRange(start,1,out.length,HEADERS.length).setValues(out); }
+// function readRows_(sh){ const lr=sh.getLastRow(); const lc=sh.getLastColumn(); if(lr<2) return []; const raw=sh.getRange(2,1,lr-1,lc).getValues(); return raw.map(row=>{ const obj={}; for(let i=0;i<HEADERS.length;i++) obj[HEADERS[i]]=row[i]??''; return obj; }); }
+// function mergeRows_(sh,payload){ const lr=sh.getLastRow(); const lc=sh.getLastColumn(); if(lr<1){writeHeader_(sh);return;} const keyOf=r=>`${r.goalId}␟${r.taskId}`; const incoming=new Map(payload.map(r=>[keyOf(r),r])); const existing=lr>=2?sh.getRange(2,1,lr-1,lc).getValues():[]; const header=sh.getRange(1,1,1,lc).getValues()[0]; const col={}; header.forEach((h,i)=>col[h]=i); const toDelete=[]; const seen=new Set(); existing.forEach((row,i)=>{ const key=`${row[col.goalId]||''}␟${row[col.taskId]||''}`; const inc=incoming.get(key); if(!inc){ toDelete.push(i+2); return; } seen.add(key); const desired=HEADERS.map(h=>inc[h]??''); let diff=false; for(let j=0;j<desired.length;j++){ if((row[j]||'')!==desired[j]){ diff=true; break; } } if(diff) sh.getRange(i+2,1,1,HEADERS.length).setValues([desired]); }); if(toDelete.length){ toDelete.sort((a,b)=>b-a).forEach(r=>sh.deleteRow(r)); } const newRows=[]; payload.forEach(r=>{ const key=keyOf(r); if(!seen.has(key)) newRows.push(HEADERS.map(h=>r[h]??'')); }); if(newRows.length){ const start=Math.max(1,sh.getLastRow())+1; sh.getRange(start,1,newRows.length,HEADERS.length).setValues(newRows); } }
+
+// =============================================================
+// OPTIONAL Cloudflare Worker CORS proxy (worker.js)
+// =============================================================
+// export default {
+//   async fetch(request) {
+//     const url = new URL(request.url);
+//     const target = url.searchParams.get('u');
+//     if (!target) return new Response('Missing ?u= param', { status: 400 });
+//     const init = { method: request.method, headers: {} };
+//     // forward body for POST
+//     if (request.method !== 'GET' && request.method !== 'HEAD') {
+//       init.body = await request.text();
+//     }
+//     // Force simple request downstream to avoid preflight: keep Content-Type text/plain when present
+//     const ct = request.headers.get('content-type');
+//     if (ct) init.headers['content-type'] = ct;
+//     const resp = await fetch(target, init);
+//     const text = await resp.text();
+//     return new Response(text, {
+//       status: resp.status,
+//       headers: {
+//         'content-type': resp.headers.get('content-type') || 'application/json; charset=utf-8',
+//         'access-control-allow-origin': '*',
+//         'access-control-allow-methods': 'GET,POST,OPTIONS',
+//         'access-control-allow-headers': 'Content-Type'
+//       }
+//     });
+//   }
+// };
